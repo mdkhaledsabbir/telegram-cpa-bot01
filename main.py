@@ -6,14 +6,23 @@ import firebase_admin
 from firebase_admin import credentials, db
 
 # 🔐 Environment Variables (Render or GitHub Actions)
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
-FIREBASE_CRED = os.environ.get("FIREBASE_CREDENTIALS")
-FIREBASE_DB_URL = os.environ.get("FIREBASE_DB_URL")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
+FIREBASE_CRED = os.getenv("FIREBASE_CREDENTIALS")
+FIREBASE_DB_URL = os.getenv("FIREBASE_DB_URL")
+
+if not BOT_TOKEN or not ADMIN_ID or not FIREBASE_CRED or not FIREBASE_DB_URL:
+    raise Exception("One or more required environment variables are missing!")
+
+try:
+    ADMIN_ID = int(ADMIN_ID)
+except ValueError:
+    raise Exception("ADMIN_ID must be an integer!")
 
 # ✅ Firebase Initialization
 if not firebase_admin._apps:
-    cred = credentials.Certificate(json.loads(FIREBASE_CRED))
+    cred_dict = json.loads(FIREBASE_CRED)
+    cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred, {
         'databaseURL': FIREBASE_DB_URL
     })
@@ -45,8 +54,9 @@ def send_welcome(message):
     user = get_user(user_id)
 
     # Handle referral
-    if len(message.text.split()) > 1:
-        referrer = message.text.split()[1]
+    parts = message.text.split()
+    if len(parts) > 1:
+        referrer = parts[1]
         if referrer != user_id:
             ref_user = get_user(referrer)
             ref_user['referrals'] += 1
