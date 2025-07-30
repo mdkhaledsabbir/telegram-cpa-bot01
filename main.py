@@ -50,6 +50,9 @@ new_tasks = {
 
 MIN_WITHDRAW_AMOUNT = 600
 
+# ইউজারের স্ক্রিনশট সাবমিশন স্টেট ট্র্যাক করার জন্য dict
+user_screenshot_state = {}
+
 def main_menu(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     buttons = [
@@ -82,6 +85,7 @@ def start(msg):
             'referrals': 0,
             'screenshots': [],
             'submitted': False,
+            'submitted_task': "",
             'withdraw': []
         })
 
@@ -107,38 +111,85 @@ def task(msg):
         task_text += f"{k}. {v}\n\n"
     bot.send_message(msg.chat.id, task_text)
 
+# ================================
+# স্ক্রিনশট সাবমিশন সিস্টেম আপডেট শুরু
+# ================================
+
 @bot.message_handler(func=lambda msg: msg.text == "📷 স্ক্রিনশট সাবমিট")
 def request_screenshots(msg):
     user_id = str(msg.chat.id)
-    screenshot_ref = db.reference(f'users/{user_id}/screenshots')
-    existing = screenshot_ref.get() or []
-
-    if len(existing) >= 3:
+    user_data = db.reference(f'users/{user_id}').get() or {}
+    existing_screenshots = user_data.get('screenshots', [])
+    
+    if existing_screenshots and len(existing_screenshots) >= 3:
         bot.send_message(msg.chat.id, "✅ আপনি ইতোমধ্যে ৩টি স্ক্রিনশট জমা দিয়েছেন। দয়া করে অপেক্ষা করুন।")
         return
 
-    bot.send_message(msg.chat.id, "🖼️ দয়া করে আপনার ৩টি স্ক্রিনশট একসাথে পাঠান।")
+    # ইউজারের স্ক্রিনশট জমা স্টেট রিসেট ও শুরু করা
+    user_screenshot_state[user_id] = {
+        'task': None,
+        'screenshots': []
+    }
+    
+    # টাস্ক লিস্ট থেকে সিলেকশন করাতে হবে
+    markup = types.ReplyKeyboardMarkup(one_time_keyboard=True, resize_keyboard=True)
+    for k, v in new_tasks.items():
+        markup.add(types.KeyboardButton(f"{k}. {v}"))
+    bot.send_message(msg.chat.id, "দয়া করে টাস্ক সিলেক্ট করুন যার স্ক্রিনশট জমা দিতে চান:", reply_markup=markup)
+
+@bot.message_handler(func=lambda msg: str(msg.chat.id) in user_screenshot_state and user_screenshot_state[str(msg.chat.id)]['task'] is None)
+def task_selected(msg):
+    user_id = str(msg.chat.id)
+    text = msg.text.strip()
+    task_id = text.split('.')[0]  # "১. ..." থেকে শুধু ১ নিয়ে আসবে
+    
+    if task_id not in new_tasks:
+        bot.send_message(msg.chat.id, "❌ অনুগ্রহ করে লিস্ট থেকে টাস্কটি সিলেক্ট করুন।")
+        return
+
+    user_screenshot_state[user_id]['task'] = task_id
+    bot.send_message(msg.chat.id, f"আপনি সিলেক্ট করেছেন: {new_tasks[task_id]}\n\nএখন ৩টি স্ক্রিনশট একে একে পাঠান।")
 
 @bot.message_handler(content_types=['photo'])
 def handle_photo(msg):
     user_id = str(msg.chat.id)
-    screenshot_ref = db.reference(f'users/{user_id}/screenshots')
-    existing = screenshot_ref.get() or []
 
-    if len(existing) >= 3:
-        bot.send_message(msg.chat.id, "✅ আপনি ইতোমধ্যে ৩টি স্ক্রিনশট জমা দিয়েছেন। দয়া করে অপেক্ষা করুন।")
-        return
+    # যদি স্ক্রিনশট সাবমিশন স্টেট না থাকে
+    if user_id not in user_screenshot_state or user_screenshot_state[user_id]['task'] is None:
+        # আগের কোড অনুযায়ী হ্যান্ডল করতে পারেন
+        existing = db.reference(f'users/{user_id}/screenshots').get() or []
+        if len(existing) >= 3:
+            bot.send_message(msg.chat.id, "✅ আপনি ইতোমধ্যে ৩টি স্ক্রিনশট জমা দিয়েছেন। দয়া করে অপেক্ষা করুন।")
+            return
+        else:
+            bot.send_message(msg.chat.id, "স্ক্রিনশট জমা দিতে প্রথমে '📷 স্ক্রিনশট সাবমিট' বাটন চাপুন এবং টাস্ক সিলেক্ট করুন।")
+            return
 
-    existing.append(msg.photo[-1].file_id)
-    screenshot_ref.set(existing)
+    # যদি স্টেট আছে, তাহলে স্ক্রিনশট যোগ করুন
+    current_screenshots = user_screenshot_state[user_id]['screenshots']
+    current_screenshots.append(msg.photo[-1].file_id)
+    user_screenshot_state[user_id]['screenshots'] = current_screenshots
+    bot.send_message(msg.chat.id, f"📸 স্ক্রিনশট {len(current_screenshots)} জমা হয়েছে।")
 
-    bot.send_message(msg.chat.id, f"📸 স্ক্রিনশট {len(existing)} জমা হয়েছে।")
+    if len(current_screenshots) == 3:
+        # ৩টি স্ক্রিনশট জমা হলে Firebase এ আপডেট করুন
+        user_ref = db.reference(f'users/{user_id}')
+        user_ref.update({
+            'screenshots': current_screenshots,
+            'submitted_task': user_screenshot_state[user_id]['task'],
+            'submitted': True
+        })
 
-    if len(existing) == 3:
-        media_group = [types.InputMediaPhoto(file_id) for file_id in existing]
+        # এডমিনকে স্ক্রিনশট ও টাস্ক সহ পাঠান
+        media_group = [types.InputMediaPhoto(fid) for fid in current_screenshots]
         bot.send_media_group(ADMIN_ID, media_group)
-        bot.send_message(ADMIN_ID, f"👤 ইউজার: {user_id}\n\n✅ স্ক্রিনশট যাচাই করুন:", reply_markup=approve_reject_markup(user_id))
-        bot.send_message(msg.chat.id, "✅ স্ক্রিনশট সফলভাবে পাঠানো হয়েছে। এপ্রুভ হলে আপনাকে জানানো হবে।")
+        task_name = new_tasks[user_screenshot_state[user_id]['task']]
+        bot.send_message(ADMIN_ID, f"👤 ইউজার: {user_id}\nটাস্ক: {task_name}\n\nস্ক্রিনশট যাচাই করুন:", reply_markup=approve_reject_markup(user_id))
+
+        bot.send_message(msg.chat.id, "✅ আপনার স্ক্রিনশট সফলভাবে জমা হয়েছে। এপ্রুভ হলে আপনাকে জানানো হবে।")
+
+        # স্টেট ক্লিয়ার করুন
+        del user_screenshot_state[user_id]
 
 def approve_reject_markup(user_id):
     markup = types.InlineKeyboardMarkup()
@@ -158,12 +209,20 @@ def handle_ss_approval(call):
     if action == "approve_ss":
         user_ref.child('balance').set(balance + 30)
         user_ref.child('screenshots').set([])
+        user_ref.child('submitted').set(False)
+        user_ref.child('submitted_task').set("")
         bot.send_message(int(user_id), "🎉 আপনার স্ক্রিনশট এপ্রুভ হয়েছে। ৩০ টাকা ব্যালেন্সে যোগ হয়েছে।")
         bot.edit_message_text("✅ Approve করা হয়েছে।", call.message.chat.id, call.message.message_id)
     else:
-        bot.send_message(int(user_id), "❌ আপনার টাস্ক পূরণ সঠিক হয়নি। স্ক্রিনশট রিজেক্ট করা হয়েছে।")
+        bot.send_message(int(user_id), "❌ আপনার টাস্ক পূরণ সঠিক হয়নি। স্ক্রিনশট রিজেক্ট করা হয়েছে। আবার চেষ্টা করুন।")
         user_ref.child('screenshots').set([])
+        user_ref.child('submitted').set(False)
+        user_ref.child('submitted_task').set("")
         bot.edit_message_text("❌ Reject করা হয়েছে।", call.message.chat.id, call.message.message_id)
+
+# ================================
+# স্ক্রিনশট সাবমিশন সিস্টেম আপডেট শেষ
+# ================================
 
 @bot.message_handler(func=lambda msg: msg.text == "💰 ব্যালেন্স")
 def balance(msg):
@@ -242,16 +301,85 @@ def rules(msg):
         "✅ যারা সঠিকভাবে সার্ভে পূরণ ও স্ক্রিনশট সাবমিট করবে, তারাই ১০০% উইথড্র করতে পারবে কোনো ঝামেলা ছাড়াই।\n"
         "⏱️ ১টি টাস্ক পূরণ করার পর মিনিমাম ১০ মিনিট বিরতি দিয়ে পরবর্তী টাস্ক পূরণ করতে হবে।"
     ))
+# ================================
+# অ্যাডমিন প্যানেল আপডেট শুরু (আগের কোডের শেষে)
+# ================================
 
-@bot.message_handler(func=lambda msg: msg.text == "🧑‍💼 অ্যাডমিন")
-def admin(msg):
-    if msg.chat.id != ADMIN_ID:
-        bot.send_message(msg.chat.id, "❌ এই ফিচারটি কেবল অ্যাডমিনের জন্য।")
+@bot.message_handler(func=lambda msg: msg.text == "🧑‍💼 অ্যাডমিন" and msg.chat.id == ADMIN_ID)
+def admin_panel(msg):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("👀 ইউজার দেখুন", callback_data="admin_view_users"),
+        types.InlineKeyboardButton("✏️ ইউজার এডিট", callback_data="admin_edit_user")
+    )
+    bot.send_message(msg.chat.id, "অ্যাডমিন প্যানেল থেকে অপশন বেছে নিন:", reply_markup=markup)
+
+# ইউজার দেখার জন্য callback
+@bot.callback_query_handler(func=lambda call: call.data == "admin_view_users" and call.from_user.id == ADMIN_ID)
+def admin_view_users(call):
+    all_users = db.reference('users').get() or {}
+    if not all_users:
+        bot.answer_callback_query(call.id, "কোনো ইউজার পাওয়া যায়নি।")
+        return
+    msg_text = "📋 সকল ইউজার এর তথ্য:\n\n"
+    for uid, data in all_users.items():
+        bal = data.get('balance', 0)
+        refs = data.get('referrals', 0)
+        submitted_task = data.get('submitted_task', 'None')
+        submitted = data.get('submitted', False)
+        msg_text += (
+            f"👤 ইউজার আইডি: {uid}\n"
+            f"💰 ব্যালেন্স: {bal} টাকা\n"
+            f"👥 রেফার: {refs} জন\n"
+            f"📝 সাবমিট করা টাস্ক: {submitted_task}\n"
+            f"📸 সাবমিশন স্ট্যাটাস: {'হ্যাঁ' if submitted else 'না'}\n\n"
+        )
+    # যদি অনেক বড় হয়, টুকরো পাঠাতে পারেন, এখানে একবারে পাঠানো হলো
+    bot.send_message(call.message.chat.id, msg_text)
+    bot.answer_callback_query(call.id)
+
+# ইউজার এডিট এর জন্য callback (স্টেপ বাই স্টেপ)
+admin_edit_state = {}
+
+@bot.callback_query_handler(func=lambda call: call.data == "admin_edit_user" and call.from_user.id == ADMIN_ID)
+def admin_edit_user_start(call):
+    bot.send_message(call.message.chat.id, "🔢 ইউজারের আইডি লিখুন যার ব্যালেন্স পরিবর্তন করতে চান:")
+    admin_edit_state[call.message.chat.id] = {'step': 'awaiting_user_id'}
+    bot.answer_callback_query(call.id)
+
+@bot.message_handler(func=lambda msg: msg.chat.id in admin_edit_state and admin_edit_state[msg.chat.id]['step'] == 'awaiting_user_id')
+def admin_receive_user_id(msg):
+    user_id = msg.text.strip()
+    user_ref = db.reference(f'users/{user_id}')
+    if not user_ref.get():
+        bot.send_message(msg.chat.id, "❌ ইউজার আইডি পাওয়া যায়নি। আবার চেষ্টা করুন।")
+        return
+    admin_edit_state[msg.chat.id]['user_id'] = user_id
+    admin_edit_state[msg.chat.id]['step'] = 'awaiting_new_balance'
+    bot.send_message(msg.chat.id, f"✅ ইউজার পাওয়া গেছে: {user_id}\n\nনতুন ব্যালেন্স (টাকায়) লিখুন:")
+
+@bot.message_handler(func=lambda msg: msg.chat.id in admin_edit_state and admin_edit_state[msg.chat.id]['step'] == 'awaiting_new_balance')
+def admin_receive_new_balance(msg):
+    try:
+        new_balance = int(msg.text.strip())
+        if new_balance < 0:
+            raise ValueError
+    except ValueError:
+        bot.send_message(msg.chat.id, "❌ অনুগ্রহ করে একটি বৈধ ধনাত্মক সংখ্যা লিখুন।")
         return
 
-    all_users = db.reference('users').get() or {}
-    msg_text = f"📊 মোট ইউজার: {len(all_users)} জন\n"
-    bot.send_message(msg.chat.id, msg_text)
+    user_id = admin_edit_state[msg.chat.id]['user_id']
+    user_ref = db.reference(f'users/{user_id}')
+    user_ref.child('balance').set(new_balance)
+    bot.send_message(msg.chat.id, f"✅ ইউজার {user_id} এর ব্যালেন্স সফলভাবে আপডেট হয়েছে: {new_balance} টাকা।")
+    del admin_edit_state[msg.chat.id]
+
+# ================================
+# অ্যাডমিন প্যানেল আপডেট শেষ
+# ================================
+
+
+# Flask app এবং polling (আগের মতোই)
 
 app = Flask(__name__)
 
